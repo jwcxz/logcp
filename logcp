@@ -1,0 +1,169 @@
+#!/bin/bash
+
+# logcp
+# jwc :: jwcxz.com
+# a small script to copy a series of files (either standalone or in
+# directories) based on recent modification time to a new place
+
+# colors
+CRST=`tput sgr0`
+CRED=`tput setaf 1`
+CYLW=`tput setaf 3`
+CGRN=`tput setaf 2`
+CDBG=`tput setaf 4`
+
+# look for config file
+if [[ "$CFG" == "" ]]; then
+    CFG="$HOME/.logcp.cfg"
+fi
+
+if [[ ! -f "$CFG" ]]; then 
+    echo $CRED"no config file found!"$CRST
+    exit 1
+fi
+
+# read in the config
+. $CFG
+
+# optionally override number of objects to look for
+if [[ "$1" != "" ]]; then
+    NUM="$1"
+fi
+
+# ensure all vars are configured
+if [[ "$SRCDIR" == "" || "$DSTDIR" == "" || "$LOG" == "" || "$NUM" == "" ]]; then
+    echo $CRED"configuration incomplete"$CRST
+    exit 1
+fi
+
+# mapping file
+MAP=`mktemp /tmp/logcp-map-$USER-XXXXXXX.logcpmap`
+
+# marker for lines that are destinations (prefix)
+DESTPFXRE='^\s*->\s*'
+
+# include files with . at the beginning
+shopt -s dotglob
+
+
+cp_cmd () {
+    origobj=`realpath "$SRCDIR/$1"`
+    destdir=`realpath "$DSTDIR/$2"`
+
+    # make sure destination doesn't already exist, give up otherwise
+    [ -e "$destdir" ] && return 10
+
+    # make destination directory
+    $DRYRUN mkdir -p "$destdir" || return 20
+
+    if [ -d "$origobj" ]; then
+        # source was a directory, so copy everything in it
+        $DRYRUN cp -a "$origobj/." "$destdir" || return 30
+    elif [ -f "$origobj" ]; then
+        # source was a file
+        $DRYRUN cp -a "$origobj" "$destdir" || return 31
+    else
+        # source doesn't exist
+        return 11
+    fi
+
+    # record new destination to history
+    echo "$dest" >> "$LOG" || return 40
+
+    return 0
+}
+
+cp_cmd_ret() {
+    case $1 in
+        0)
+            echo $CGRN"ok"$CRST
+            ;;
+        10)
+            echo $CRED"failed: destination exists"$CRST
+            ;;
+        11)
+            echo $CRED"failed: source doesn't exist"$CRST
+            ;;
+        20)
+            echo $CRED"failed to make destination directory"$CRST
+            ;;
+        30)
+            echo $CRED"failed to copy source directory"$CRST
+            ;;
+        31)
+            echo $CRED"failed to copy source file"$CRST
+            ;;
+        40)
+            echo $CRED"failed to write to logfile"$CRST
+            ;;
+    esac
+}
+
+
+### MAIN LOOP ###
+
+# read $NUM latest lines and build map file
+ls -1tr "$SRCDIR" | tail -n "$NUM" | sed -e 's/$/\n    -> .\//g' > "$MAP"
+
+
+# invoke editor on mapping file, but while in the destination directory (to
+# enable autocompletion)
+cd "$DSTDIR"
+$EDITOR "$MAP"
+cd -
+
+
+# interpret user input
+orig=""
+last=1
+cat "$MAP" | while read mlineraw; do
+    # strip out comments and trailing whitespace
+    mline=`echo "$mlineraw" | sed -e 's/\s*\(#.*\)*$//g'`
+
+    if [[ "$mline" == "" ]]; then
+        # empty line
+        continue
+
+    elif [[ "$mline" =~ $DESTPFXRE ]]; then
+        # destination
+        last=1
+
+        # strip off destination prefix
+        dest=`echo "$mline" | sed -e "s/$DESTPFXRE//g"`
+
+        # don't try to copy if the origin isn't specified
+        [[ "$orig" == "" ]] && echo $CRED"ignored $dest"$CRST && continue
+
+        # if the destination was filled in, try to copy
+        if [[ "$dest" != "" && "$dest" != "./" ]]; then
+            # copy and print result
+            dbg=`cp_cmd "$orig" "$dest"`
+            ret=$?
+
+            echo -n "    -> $dest : "
+            cp_cmd_ret $ret
+
+            # print debug output from the action
+            if [[ "$dbg" != "" ]]; then
+                echo $CDBG"$dbg"$CRST >&2
+            fi
+
+        else
+            echo $CYLW"    XX ignoring"$CRST
+        fi
+
+    else
+        orig="$mline"
+
+        if [[ $last -eq 0 ]]; then
+            echo $CYLW"    XX ignoring"$CRST
+        fi
+
+        echo "$orig"
+        last=0
+    fi
+done
+
+
+# get rid of map file
+rm -f "$MAP"
